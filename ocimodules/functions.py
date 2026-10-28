@@ -8,6 +8,7 @@ and optional logging to file.
 """
 
 import argparse
+import configparser
 import os
 import shutil
 import subprocess
@@ -25,6 +26,9 @@ WaitRefresh = 10
 
 # Maximum number of retries for HTTP 429 before giving up
 MaxRetries = 10
+
+# Warn once when get_owner() is used without owner tag keys in OCI config
+_get_owner_config_warning_shown = False
 
 
 class OCICompartments:
@@ -448,6 +452,99 @@ def GetCompartmentFullPath(compartments, ocid):
 #################################################
 # Find a compartment by OCID, name or full path
 #################################################
+def _owner_tag_keys_from_config_dict(config):
+    if not config:
+        return None
+    namespace = config.get("owner_namespace")
+    owner_key = config.get("owner_name")
+    created_key = config.get("owner_created")
+    if namespace and owner_key and created_key:
+        return {
+            "owner_namespace": str(namespace).strip(),
+            "owner_name": str(owner_key).strip(),
+            "owner_created": str(created_key).strip(),
+        }
+    return None
+
+
+def _owner_tag_keys_from_config_file(config_profile=None):
+    config_path = os.path.expanduser(oci.config.DEFAULT_LOCATION)
+    profile = config_profile or oci.config.DEFAULT_PROFILE
+    if not os.path.isfile(config_path):
+        return None
+
+    parser = configparser.ConfigParser()
+    parser.read(config_path, encoding="utf-8")
+    if not parser.has_section(profile):
+        return None
+
+    section = parser[profile]
+    namespace = section.get("owner_namespace")
+    owner_key = section.get("owner_name")
+    created_key = section.get("owner_created")
+    if namespace and owner_key and created_key:
+        return {
+            "owner_namespace": namespace.strip(),
+            "owner_name": owner_key.strip(),
+            "owner_created": created_key.strip(),
+        }
+    return None
+
+
+def _warn_owner_tag_config_missing():
+    global _get_owner_config_warning_shown
+    if _get_owner_config_warning_shown:
+        return
+    _get_owner_config_warning_shown = True
+    print("WARNING: get_owner: owner tag mapping is not configured in the OCI config file ({}).".format(
+        os.path.expanduser(oci.config.DEFAULT_LOCATION)
+    ))
+    print("Add to your profile, for example:")
+    print("  owner_namespace=Mandatory_Tags")
+    print("  owner_name=Owner")
+    print("  owner_created=CreatedOn")
+
+
+def get_owner(defined_tags, config=None, config_profile=None):
+    """
+    Read owner and created-on values from predefined (defined) tags on a resource.
+
+    Tag key names and namespace are taken from the active OCI config profile:
+      owner_namespace  - defined-tags namespace (e.g. Mandatory_Tags)
+      owner_name       - tag key for owner (e.g. Owner)
+      owner_created    - tag key for created date (e.g. CreatedOn)
+
+    Parameters
+    ----------
+    defined_tags : dict
+        Resource defined_tags as returned by OCI APIs (namespace -> {key: value}).
+    config : dict, optional
+        Config dict from create_signer(); owner_* keys are used when present.
+    config_profile : str, optional
+        Profile in ~/.oci/config when owner_* keys are not in `config` (default: DEFAULT).
+
+    Returns
+    -------
+    dict
+        {'owner': str or None, 'created_on': str or None}
+    """
+    mapping = _owner_tag_keys_from_config_dict(config)
+    if mapping is None:
+        mapping = _owner_tag_keys_from_config_file(config_profile)
+
+    if mapping is None:
+        _warn_owner_tag_config_missing()
+        return {"owner": None, "created_on": None}
+
+    defined_tags = defined_tags or {}
+    ns_tags = defined_tags.get(mapping["owner_namespace"]) or {}
+
+    return {
+        "owner": ns_tags.get(mapping["owner_name"]),
+        "created_on": ns_tags.get(mapping["owner_created"]),
+    }
+
+
 def FindCompartment(compartments, value):
     """
     Given a list of OCICompartments objects and a value that is either an OCID,

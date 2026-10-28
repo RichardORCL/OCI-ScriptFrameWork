@@ -12,10 +12,13 @@ __pycache__/
 venv/
 env/
 
-# Script output / logs
+# Script output / logs / exports
 log.txt
 *.log
 *.csv
+*.xlsx
+*.xlsm
+*.xls
 *.json
 !requirements*.json
 

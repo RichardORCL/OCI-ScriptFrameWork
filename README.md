@@ -45,6 +45,14 @@ key_file=~/.oci/oci_api_key.pem
 
 Use `-cp PROFILE` to select a profile other than `DEFAULT`.
 
+Optional tag-mapping keys (used by `get_owner()` in scripts):
+
+```ini
+owner_namespace=Mandatory_Tags
+owner_name=Owner
+owner_created=CreatedOn
+```
+
 ### 2. Session (token-based) authentication
 
 Useful when you cannot or do not want to create an API key, e.g. with federated / SSO users. A browser opens, you log in, and a short-lived session token (1 hour, refreshable up to 24 hours) is stored in a profile in `~/.oci/config`. See [Token-based Authentication for the CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/clitoken.htm). Requires the [OCI CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm) (`pip install oci-cli`).
@@ -136,19 +144,6 @@ for comp in targets:
 
 To work across all subscribed regions, loop over `regions` and set `config["region"]` before creating each client.
 
-## Project structure
-
-```text
-.
-├── application.py          # Script template - copy this to start a new script
-├── ocimodules/
-│   ├── __init__.py
-│   └── functions.py        # Reusable helper functions (see below)
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
-
 ## Functions available in `ocimodules/functions.py`
 
 ### Command line and authentication
@@ -179,6 +174,27 @@ To work across all subscribed regions, loop over `regions` and set `config["regi
 | `GetCompartments(identity, root_id, subtree=False)` | Low-level: lists the child compartments of `root_id` (all pages). `subtree=True` is only valid for the tenancy OCID. Retries on HTTP 429. |
 | `GetCompartmentFullPath(compartments, ocid)` | Resolves a compartment OCID to its full path using the list from `GetFullCompartments`. Returns `None` if not found. |
 | `FindCompartment(compartments, value)` | Finds a compartment by OCID, full path or name. Returns an `OCICompartments` or `None`. |
+
+### Tags / owner (defined tags)
+
+| Function | Description |
+| --- | --- |
+| `get_owner(defined_tags, config=None, config_profile=None)` | Reads **owner** and **created_on** from a resource's `defined_tags`, using namespace/key names from the OCI config profile: `owner_namespace`, `owner_name`, `owner_created`. Returns `{'owner': ..., 'created_on': ...}`. Prints a **one-time warning** if those keys are missing from the config file. |
+
+Optional entries in `~/.oci/config` (same profile as `-cp`). The values below are **examples only**—set `owner_namespace`, `owner_name`, and `owner_created` to match the defined-tag namespace and tag keys used for mandatory tags (or your owner metadata) in **your** tenancy:
+
+```ini
+owner_namespace=Mandatory_Tags
+owner_name=Owner
+owner_created=CreatedOn
+```
+
+Example:
+
+```python
+info = get_owner(volume.defined_tags, config=config, config_profile=cmd.config_profile)
+print(info["owner"], info["created_on"])
+```
 
 ### Logging
 
