@@ -11,6 +11,8 @@ Usage:
     python application.py -ip                 # Instance Principals (on an OCI compute instance)
     python application.py -dt                 # Delegation Token (OCI Cloud Shell, auto-detected)
     python application.py -st -cp MYSESSION   # Session auth, profile created by "oci session authenticate"
+    python application.py --interactive       # Browser login via OCI CLI, creates/reuses session profile SESSION
+    python application.py --interactive MYSES # same, with a custom session profile name
     python application.py -rg eu-frankfurt-1  # work in a specific region
     python application.py -c /root/prod       # work in a specific compartment (OCID, name or path)
     python application.py -log run.txt        # also write all output to a log file
@@ -64,7 +66,8 @@ def main():
         #################################################
         # oci config and "login" check
         #################################################
-        config, signer = create_signer(cmd.config_profile, cmd.is_instance_principals, cmd.is_delegation_token, cmd.is_security_token)
+        config, signer = create_signer(cmd.config_profile, cmd.is_instance_principals, cmd.is_delegation_token, cmd.is_security_token,
+                                       interactive=(cmd.interactive_profile != ""), region=cmd.region)
         tenant_id = config['tenancy']
 
         login(config, signer)

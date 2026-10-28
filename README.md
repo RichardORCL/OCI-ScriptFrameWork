@@ -8,7 +8,7 @@ Every OCI script needs the same boilerplate: parse command-line options, authent
 
 - Four authentication methods, selected from the command line:
   - API key from `~/.oci/config` (any profile)
-  - Session / token-based authentication (`oci session authenticate`, browser login, no API key needed)
+  - Session / token-based authentication (browser login, no API key needed) - either fully integrated via `--interactive` or with an existing `oci session authenticate` profile
   - Instance Principals (when running on an OCI compute instance)
   - Delegation Token (OCI Cloud Shell, auto-detected)
 - Tenancy name, home region and subscribed regions discovery
@@ -47,17 +47,31 @@ Use `-cp PROFILE` to select a profile other than `DEFAULT`.
 
 ### 2. Session (token-based) authentication
 
-Useful when you cannot or do not want to create an API key, e.g. with federated / SSO users. The OCI CLI opens a browser, you log in, and a short-lived session token (1 hour, refreshable up to 24 hours) is written to a profile in `~/.oci/config`. See [Token-based Authentication for the CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/clitoken.htm).
+Useful when you cannot or do not want to create an API key, e.g. with federated / SSO users. A browser opens, you log in, and a short-lived session token (1 hour, refreshable up to 24 hours) is stored in a profile in `~/.oci/config`. See [Token-based Authentication for the CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/clitoken.htm). Requires the [OCI CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm) (`pip install oci-cli`).
+
+**Integrated (recommended):**
+
+```bash
+python application.py --interactive                         # session profile "SESSION"
+python application.py --interactive MYSESSION -rg eu-frankfurt-1
+```
+
+`--interactive` (or `-i`) takes care of the whole session lifecycle:
+
+1. If the session profile exists and the token is still valid, it is reused (no browser).
+2. If the token has expired, `oci session refresh` is tried first (silent, works up to 24 h after login).
+3. Otherwise `oci session authenticate` is run and a browser opens for login. Pass `-rg REGION` to skip the CLI's region prompt.
+
+It refuses to overwrite a profile that is not a session profile, so an existing API-key profile with the same name is safe.
+
+**Manual:**
 
 ```bash
 oci session authenticate --profile-name MYSESSION --region eu-frankfurt-1
 python application.py -st -cp MYSESSION
-
-# later, when the token is about to expire
-oci session refresh --profile MYSESSION
 ```
 
-The script checks the token's expiry before calling any API and tells you how to refresh it. Setting `OCI_CLI_AUTH=security_token` (the variable the OCI CLI uses) enables this mode automatically, so `-st` can be omitted.
+Setting `OCI_CLI_AUTH=security_token` (the variable the OCI CLI uses) enables `-st` automatically. In both variants the script checks the token's expiry before calling any API.
 
 ### 3. Instance Principals
 
@@ -78,7 +92,8 @@ python application.py [options]
 | `-cp PROFILE` | Config profile inside `~/.oci/config` (default: `DEFAULT`) |
 | `-ip` | Use Instance Principals for authentication |
 | `-dt` | Use Delegation Token for authentication (Cloud Shell) |
-| `-st` | Use Session (security token) authentication; combine with `-cp` to pick the session profile |
+| `-st` | Use Session (security token) authentication with an existing session profile; combine with `-cp` to pick it |
+| `-i [PROFILE]`, `--interactive [PROFILE]` | Browser login via the OCI CLI: create, refresh or reuse a session token in the given session profile (default: `SESSION`) |
 | `-rg REGION` | Work in a specific subscribed region, e.g. `eu-frankfurt-1` |
 | `-c COMPARTMENT` | Work in a specific compartment. Accepts an OCID, a name or a full path such as `/root/prod` |
 | `-log [FILE]` | Also write all output to a log file (default file name: `log.txt`) |
@@ -140,8 +155,10 @@ To work across all subscribed regions, loop over `regions` and set `config["regi
 
 | Function | Description |
 | --- | --- |
-| `input_command_line(help=False)` | Parses the standard options (`-cp`, `-ip`, `-dt`, `-st`, `-rg`, `-c`, `-log`) and auto-detects Cloud Shell (`OCI_CLI_CLOUD_SHELL`) and session auth (`OCI_CLI_AUTH=security_token`). Returns an `argparse.Namespace`. |
-| `create_signer(config_profile, is_instance_principals, is_delegation_token, is_security_token=False)` | Builds the OCI `config` dict and `signer` for the selected authentication method. For session auth it verifies the token has not expired and fills `config["user"]` from the token. Exits with a message on failure. |
+| `input_command_line(help=False)` | Parses the standard options (`-cp`, `-ip`, `-dt`, `-st`, `-i/--interactive`, `-rg`, `-c`, `-log`) and auto-detects Cloud Shell (`OCI_CLI_CLOUD_SHELL`) and session auth (`OCI_CLI_AUTH=security_token`). Returns an `argparse.Namespace`. |
+| `create_signer(config_profile, is_instance_principals, is_delegation_token, is_security_token=False, interactive=False, region="")` | Builds the OCI `config` dict and `signer` for the selected authentication method. For session auth it verifies the token has not expired and fills `config["user"]` from the token; with `interactive=True` it first calls `ensure_interactive_session`. Exits with a message on failure. |
+| `ensure_interactive_session(profile, region="")` | Guarantees a valid session token for `profile` using the OCI CLI: reuse → `oci session refresh` → `oci session authenticate` (browser). Refuses to overwrite non-session profiles. |
+| `session_profile_status(profile)` | Returns `("missing" / "not_session" / "expired" / "valid", expiry_datetime)` for a profile in `~/.oci/config`. |
 | `login(config, signer)` | Prints the SDK version and the identity in use. Returns the user name, or `None` for Instance Principals / Delegation Token. |
 | `check_oci_version(min_version)` | Exits with an upgrade hint if the installed OCI SDK is older than `min_version`. |
 

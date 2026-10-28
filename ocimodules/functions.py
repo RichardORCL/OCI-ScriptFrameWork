@@ -9,10 +9,16 @@ and optional logging to file.
 
 import argparse
 import os
+import shutil
+import subprocess
 import sys
 import time
+from datetime import datetime
 
 import oci
+
+# Default profile name used by --interactive (browser based session login)
+DefaultSessionProfile = "SESSION"
 
 # Seconds to wait before retrying an API call that returned HTTP 429 (Too Many Requests)
 WaitRefresh = 10
@@ -43,6 +49,8 @@ def input_command_line(help=False):
     parser.add_argument('-ip', action='store_true', default=False, dest='is_instance_principals', help='Use Instance Principals for Authentication')
     parser.add_argument('-dt', action='store_true', default=False, dest='is_delegation_token', help='Use Delegation Token for Authentication')
     parser.add_argument('-st', action='store_true', default=False, dest='is_security_token', help='Use Session (Security Token) Authentication, created with "oci session authenticate"')
+    parser.add_argument('-i', '--interactive', nargs='?', const=DefaultSessionProfile, default="", dest='interactive_profile', metavar='PROFILE',
+                        help='Interactive browser login: create or reuse a session token via the OCI CLI ("oci session authenticate"). Optional session profile name, default: {}'.format(DefaultSessionProfile))
     parser.add_argument("-log", nargs='?', const='log.txt', default="", dest='log_file', help="Output also to logfile. If logfile not specified, will log to log.txt")
     parser.add_argument("-rg", default="", dest='region', help="Select Region")
     parser.add_argument("-c", default="", dest='compartment', help="Select Compartment (OCID, name or full path e.g. /root/prod)")
@@ -54,7 +62,15 @@ def input_command_line(help=False):
         cmd.is_delegation_token = True
         cmd.is_instance_principals = False
         cmd.is_security_token = False
+        cmd.interactive_profile = ""
         cmd.config_profile = "DEFAULT"
+
+    # Interactive browser login: session token authentication using the chosen session profile
+    elif cmd.interactive_profile:
+        cmd.is_security_token = True
+        cmd.is_instance_principals = False
+        cmd.is_delegation_token = False
+        cmd.config_profile = cmd.interactive_profile
 
     # If OCI_CLI_AUTH=security_token is set (same variable the OCI CLI uses), default to Session Authentication
     elif os.environ.get("OCI_CLI_AUTH", "").lower() == "security_token" and not (cmd.is_instance_principals or cmd.is_delegation_token):
@@ -69,9 +85,15 @@ def input_command_line(help=False):
 ##########################################################################
 # Create signer for Authentication
 # Input - config_profile, is_instance_principals, is_delegation_token, is_security_token
+#         interactive: create/reuse the session token via the OCI CLI before using it (implies is_security_token)
+#         region: region to create the interactive session in (optional, CLI prompts if empty)
 # Output - config and signer objects
 ##########################################################################
-def create_signer(config_profile, is_instance_principals, is_delegation_token, is_security_token=False):
+def create_signer(config_profile, is_instance_principals, is_delegation_token, is_security_token=False, interactive=False, region=""):
+
+    if interactive:
+        is_security_token = True
+        ensure_interactive_session(config_profile, region)
 
     # -----------------------------
     # Instance Principals
@@ -186,6 +208,87 @@ def create_signer(config_profile, is_instance_principals, is_delegation_token, i
             sys.exit(1)
 
         return config, signer
+
+
+#################################################
+# Session profile helpers (interactive browser login)
+#################################################
+def session_profile_status(profile):
+    """
+    Inspect a profile in ~/.oci/config.
+    Returns (status, expiry) where status is one of:
+      "missing"     - profile does not exist
+      "not_session" - profile exists but is a regular API key profile (no security_token_file)
+      "expired"     - session profile whose token has expired (or token file is unreadable)
+      "valid"       - session profile with a valid token
+    expiry is a datetime (local time) for session profiles, else None.
+    """
+    try:
+        config = oci.config.from_file(oci.config.DEFAULT_LOCATION, profile)
+    except (oci.exceptions.ConfigFileNotFound, oci.exceptions.ProfileNotFound):
+        return "missing", None
+
+    if "security_token_file" not in config:
+        return "not_session", None
+
+    try:
+        with open(os.path.expanduser(config["security_token_file"]), 'r') as f:
+            token = f.read().strip()
+        container = oci.auth.security_token_container.SecurityTokenContainer(None, token)
+        expiry = datetime.fromtimestamp(container.get_jwt()["exp"])
+        return ("valid" if container.valid() else "expired"), expiry
+    except Exception:
+        return "expired", None
+
+
+def ensure_interactive_session(profile, region=""):
+    """
+    Make sure a valid session token exists for `profile`, using the OCI CLI:
+      - reuse it if still valid
+      - try 'oci session refresh' if expired (works up to 24h after login)
+      - otherwise run 'oci session authenticate' (opens a browser for login)
+    Refuses to touch a profile that is not a session profile. Exits on failure.
+    """
+    oci_cli = shutil.which("oci")
+    if oci_cli is None:
+        print("Interactive login requires the OCI CLI ('oci' not found in PATH).")
+        print("Install it: https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm  (or: pip install oci-cli)")
+        sys.exit(1)
+
+    status, expiry = session_profile_status(profile)
+
+    if status == "not_session":
+        print("Profile '{}' exists in {} but is not a session profile - refusing to overwrite it.".format(profile, oci.config.DEFAULT_LOCATION))
+        print("Choose another session profile name, e.g.:  --interactive MYSESSION")
+        sys.exit(1)
+
+    if status == "valid":
+        print("Reusing session profile '{}' (token valid until {:%Y-%m-%d %H:%M:%S})".format(profile, expiry))
+        return
+
+    if status == "expired":
+        print("Session profile '{}' has expired, trying to refresh..".format(profile))
+        result = subprocess.run([oci_cli, "session", "refresh", "--profile", profile])
+        status, expiry = session_profile_status(profile)
+        if result.returncode == 0 and status == "valid":
+            print("Session refreshed (token valid until {:%Y-%m-%d %H:%M:%S})".format(expiry))
+            return
+        print("Refresh not possible, a new browser login is required.")
+
+    print("Starting browser login for session profile '{}'..".format(profile))
+    command = [oci_cli, "session", "authenticate", "--profile-name", profile]
+    if region:
+        command += ["--region", region]
+    result = subprocess.run(command)
+    if result.returncode != 0:
+        print("'oci session authenticate' failed (exit code {}), aborting".format(result.returncode))
+        sys.exit(1)
+
+    status, expiry = session_profile_status(profile)
+    if status != "valid":
+        print("Session profile '{}' is still not usable after login (status: {}), aborting".format(profile, status))
+        sys.exit(1)
+    print("Session created (token valid until {:%Y-%m-%d %H:%M:%S})".format(expiry))
 
 
 #################################################
