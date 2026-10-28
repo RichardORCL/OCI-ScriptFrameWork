@@ -198,3 +198,9 @@ To work across all subscribed regions, loop over `regions` and set `config["regi
 ## Contributing
 
 Issues and pull requests are welcome. Please keep helper functions generic (no script-specific logic in `ocimodules/functions.py`).
+
+## License
+
+Copyright (c) 2018-2020 Oracle and/or its affiliates.
+
+Licensed under the [Universal Permissive License (UPL) 1.0](LICENSE.txt).
