@@ -201,6 +201,4 @@ Issues and pull requests are welcome. Please keep helper functions generic (no s
 
 ## License
 
-Copyright (c) 2018-2020 Oracle and/or its affiliates.
-
 Licensed under the [Universal Permissive License (UPL) 1.0](LICENSE.txt).
