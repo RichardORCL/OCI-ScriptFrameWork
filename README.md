@@ -4,6 +4,8 @@ A small, dependency-light base template for writing scripts against **Oracle Clo
 
 Every OCI script needs the same boilerplate: parse command-line options, authenticate (API key, Instance Principals or Cloud Shell delegation token), find the tenancy, regions and compartments, and optionally log output to a file. This repository provides that boilerplate so a new script is just "copy `application.py`, add your logic".
 
+AI coding agents should follow **[AGENTS.md](AGENTS.md)** for conventions when adding or changing scripts in this repo.
+
 ## Features
 
 - Four authentication methods, selected from the command line:
