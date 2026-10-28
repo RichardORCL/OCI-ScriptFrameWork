@@ -152,7 +152,9 @@ To work across all subscribed regions, loop over `regions` and set `config["regi
 
 | Function | Description |
 | --- | --- |
-| `input_command_line(help=False)` | Parses the standard options (`-cp`, `-ip`, `-dt`, `-st`, `-i/--interactive`, `-rg`, `-c`, `-log`) and auto-detects Cloud Shell (`OCI_CLI_CLOUD_SHELL`) and session auth (`OCI_CLI_AUTH=security_token`). Returns an `argparse.Namespace`. |
+| `input_command_line(help=False, export_options=False, min_age_option=False, disable_imds_v1_option=False)` | Parses standard options (`-cp`, `-ip`, `-dt`, `-st`, `-i/--interactive`, `-rg`, `-c`, `-log`) and optional `-csv`/`-excel`, `-minage`, `-disable`. Auto-detects Cloud Shell and session auth. Returns an `argparse.Namespace`. |
+| `resolve_export_paths(cmd, csv_default, xlsx_default)` | After `export_options=True`, applies script default filenames when `-csv`/`-excel` are used without a path. |
+| `write_excel_export_file(path, export_columns, rows, ...)` | Writes `.xlsx` via openpyxl; pass `int_columns` / `float_columns` so values like OCPUs and Days are numeric in Excel. |
 | `create_signer(config_profile, is_instance_principals, is_delegation_token, is_security_token=False, interactive=False, region="")` | Builds the OCI `config` dict and `signer` for the selected authentication method. For session auth it verifies the token has not expired and fills `config["user"]` from the token; with `interactive=True` it first calls `ensure_interactive_session`. Exits with a message on failure. |
 | `ensure_interactive_session(profile, region="")` | Guarantees a valid session token for `profile` using the OCI CLI: reuse → `oci session refresh` → `oci session authenticate` (browser). Refuses to overwrite non-session profiles. |
 | `session_profile_status(profile)` | Returns `("missing" / "not_session" / "expired" / "valid", expiry_datetime)` for a profile in `~/.oci/config`. |

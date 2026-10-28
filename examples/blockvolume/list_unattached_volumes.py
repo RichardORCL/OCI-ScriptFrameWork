@@ -46,7 +46,11 @@ from ocimodules.functions import (
     GetFullCompartments,
     FindCompartment,
     get_owner,
+    resolve_export_paths,
+    write_excel_export_file,
 )
+
+EXCEL_INT_COLUMNS = frozenset({"size_gb", "vpu", "age"})
 
 oci.circuit_breaker.GLOBAL_CIRCUIT_BREAKER_STRATEGY = oci.circuit_breaker.NoCircuitBreakerStrategy()
 
@@ -339,13 +343,6 @@ def _export_records(rows):
     return records
 
 
-def _ensure_export_extension(path, extension):
-    """Append .csv / .xlsx when the user omits the extension."""
-    if not path.lower().endswith(extension.lower()):
-        return path + extension
-    return path
-
-
 def write_csv_export(path, rows):
     records = _export_records(rows)
     fieldnames = [key for key, _ in EXPORT_COLUMNS]
@@ -357,68 +354,18 @@ def write_csv_export(path, rows):
 
 
 def write_excel_export(path, rows):
-    try:
-        from openpyxl import Workbook
-    except ImportError:
-        print("ERROR: Excel export requires openpyxl. Install with: pip install openpyxl")
-        sys.exit(1)
-
-    records = _export_records(rows)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Unattached volumes"
-    ws.append([title for _, title in EXPORT_COLUMNS])
-    for record in records:
-        ws.append([record[key] for key, _ in EXPORT_COLUMNS])
-    wb.save(path)
+    write_excel_export_file(
+        path,
+        EXPORT_COLUMNS,
+        _export_records(rows),
+        sheet_title="Unattached volumes",
+        int_columns=EXCEL_INT_COLUMNS,
+    )
 
 
 def parse_cmd():
-    """Framework CLI plus script-only -csv / -excel / -minage (stripped before input_command_line)."""
-    csv_path = ""
-    xlsx_path = ""
-    min_age_days = 0
-    argv = sys.argv[1:]
-    filtered = []
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg in ("-minage", "--minage"):
-            if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
-                print("ERROR: -minage requires a minimum age in days (e.g. -minage 90)")
-                sys.exit(1)
-            try:
-                min_age_days = int(argv[i + 1])
-                if min_age_days < 0:
-                    raise ValueError
-            except ValueError:
-                print("ERROR: -minage must be a non-negative integer (days)")
-                sys.exit(1)
-            i += 2
-            continue
-        if arg in ("-csv", "--csv"):
-            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
-                csv_path = _ensure_export_extension(argv[i + 1], ".csv")
-                i += 2
-            else:
-                csv_path = DEFAULT_CSV_EXPORT
-                i += 1
-            continue
-        if arg in ("-excel", "--excel", "-xlsx", "--xlsx"):
-            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
-                xlsx_path = _ensure_export_extension(argv[i + 1], ".xlsx")
-                i += 2
-            else:
-                xlsx_path = DEFAULT_XLSX_EXPORT
-                i += 1
-            continue
-        filtered.append(arg)
-        i += 1
-    sys.argv = [sys.argv[0]] + filtered
-    cmd = input_command_line()
-    cmd.csv_export = csv_path
-    cmd.excel_export = xlsx_path
-    cmd.min_age_days = min_age_days
+    cmd = input_command_line(export_options=True, min_age_option=True)
+    resolve_export_paths(cmd, DEFAULT_CSV_EXPORT, DEFAULT_XLSX_EXPORT)
     return cmd
 
 

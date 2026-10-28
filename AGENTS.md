@@ -17,7 +17,7 @@ Prefer extending this repo’s patterns over inventing new frameworks.
 
 1. **Do not put script-specific logic in `ocimodules/functions.py`.** Only add helpers there if they are generic and reusable across many OCI scripts. Otherwise keep logic in the script under `examples/` or a new top-level script.
 2. **Never commit credentials.** No API keys, `config`, `.pem`, session tokens, or real tenancy OCIDs in code or docs. Output files (`*.csv`, `*.xlsx`, `*.log`) are gitignored—do not force-add them.
-3. **Preserve the standard CLI** for every script that uses `input_command_line()`: `-cp`, `-ip`, `-dt`, `-st`, `-i` / `--interactive`, `-rg`, `-c`, `-log`, `-h`. Script-only flags must be stripped **before** calling `input_command_line()` (see below).
+3. **Preserve the standard CLI** for every script that uses `input_command_line()`: `-cp`, `-ip`, `-dt`, `-st`, `-i` / `--interactive`, `-rg`, `-c`, `-log`, `-h` / `--help`. Enable `-csv` / `-excel` via `input_command_line(export_options=True)` and `resolve_export_paths(cmd, csv_default, xlsx_default)` so they appear in help.
 4. **Run scripts from the repository root** so imports and paths work:
    ```bash
    python examples/compute/list_imds_v1_instances.py
@@ -76,16 +76,17 @@ Set `MIN_OCI_VERSION = "2.88.0"` (or align with `requirements.txt`) and a `SCRIP
 
 For a **single-region** script tied to `config["region"]` only, `application.py` is enough; for tenancy-wide reports, follow the **multi-region + ThreadPoolExecutor (one worker per region)** pattern in `examples/blockvolume/list_unattached_volumes.py` and siblings.
 
-## Script-specific CLI flags (`parse_cmd`)
+## Script-specific CLI flags
 
-`input_command_line()` owns `argparse` for framework flags. If the script adds options (e.g. `-csv`, `-excel`, `-minage`, `-disable`):
+Register optional flags on the shared parser so `-h` / `--help` lists them:
 
-1. Walk `sys.argv[1:]`, consume script-only flags and their values.
-2. Append everything else to a filtered list.
-3. Replace `sys.argv` with `[sys.argv[0]] + filtered`.
-4. Call `cmd = input_command_line()` and attach extra attributes (`cmd.csv_export = ...`).
+| Need | Call |
+| --- | --- |
+| CSV / Excel export | `input_command_line(export_options=True)` then `resolve_export_paths(cmd, "default.csv", "default.xlsx")` |
+| Minimum age filter | `min_age_option=True` (sets `cmd.min_age_days`) |
+| IMDS `-disable` | `disable_imds_v1_option=True` (sets `cmd.disable_imds_v1`) |
 
-Do **not** register `-csv` on the global parser in `functions.py`.
+Only add new flags to `functions.py` when multiple scripts share them; otherwise extend `input_command_line()` with a new optional `*_option` parameter.
 
 ## OCI API patterns agents should know
 
@@ -114,7 +115,7 @@ Tag namespace and keys come from the user’s **`~/.oci/config`** profile (`owne
 ## Exports and optional dependencies
 
 - **CSV:** standard library `csv`; default filenames like `report.csv`; use `_ensure_export_extension` pattern from block volume example.
-- **Excel:** optional `openpyxl`; on `ImportError`, print install hint and `sys.exit(1)`.
+- **Excel:** use `write_excel_export_file()` from `functions.py` with `int_columns` / `float_columns` so numeric fields are real Excel numbers, not text.
 - Exports are gitignored—generate them at runtime only.
 
 ## Reference examples (copy patterns from here)
@@ -124,6 +125,7 @@ Tag namespace and keys come from the user’s **`~/.oci/config`** profile (`owne
 | `examples/blockvolume/list_unattached_volumes.py` | Multi-region thread pool, `ScanProgress`, 429 retry, `-csv`/`-excel`/`-minage`, `get_owner`, age from `time_created` |
 | `examples/compute/list_imds_v1_instances.py` | Per-compartment instance listing, mutating action flag (`-disable`) with throttle-aware updates |
 | `examples/compute/list_windows_license_included.py` | Lighter scan, instance licensing fields |
+| `examples/compute/list_compute_instances.py` | Full instance inventory, images, attachments, boot/block totals, CSV/Excel |
 | `examples/objectstorage/list_public_buckets.py` | `get_namespace`, list + get detail APIs |
 | `examples/networking/list_load_balancer_tls_ciphers.py` | Listener-level reporting, SDK doc-derived predefined cipher maps |
 

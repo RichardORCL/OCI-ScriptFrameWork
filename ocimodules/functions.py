@@ -10,6 +10,7 @@ and optional logging to file.
 import argparse
 import configparser
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,9 @@ MaxRetries = 10
 # Warn once when get_owner() is used without owner tag keys in OCI config
 _get_owner_config_warning_shown = False
 
+# argparse const for -csv / -excel when path is omitted (see resolve_export_paths)
+_EXPORT_USE_DEFAULT = "__EXPORT_USE_DEFAULT__"
+
 
 class OCICompartments:
     """A compartment together with its full path (e.g. /root/prod/network) and depth level."""
@@ -44,10 +48,155 @@ class OCICompartments:
             self.fullpath, self.level, getattr(self.details, "id", None))
 
 
+def _non_negative_int(value):
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
+
+
+def ensure_export_extension(path, extension):
+    """Append .csv / .xlsx when the user omits the extension."""
+    if not path.lower().endswith(extension.lower()):
+        return path + extension
+    return path
+
+
+def resolve_export_paths(cmd, csv_default="", xlsx_default=""):
+    """
+    Turn argparse export flags into final paths on cmd (mutates cmd in place).
+
+    After input_command_line(export_options=True), -csv / -excel with no path set
+    csv_export / excel_export to _EXPORT_USE_DEFAULT; this applies script defaults.
+    """
+    if getattr(cmd, "csv_export", "") == _EXPORT_USE_DEFAULT:
+        cmd.csv_export = csv_default
+    elif getattr(cmd, "csv_export", ""):
+        cmd.csv_export = ensure_export_extension(cmd.csv_export, ".csv")
+    else:
+        cmd.csv_export = ""
+
+    if getattr(cmd, "excel_export", "") == _EXPORT_USE_DEFAULT:
+        cmd.excel_export = xlsx_default
+    elif getattr(cmd, "excel_export", ""):
+        cmd.excel_export = ensure_export_extension(cmd.excel_export, ".xlsx")
+    else:
+        cmd.excel_export = ""
+
+    return cmd
+
+
+_LEADING_NUMBER_RE = re.compile(r"^(\d+(?:\.\d+)?)")
+
+
+def _parse_excel_number(text, as_integer):
+    """Parse a full number or a leading number (e.g. boot VPU '10 (auto)' -> 10)."""
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        match = _LEADING_NUMBER_RE.match(text)
+        if not match:
+            return None
+        number = float(match.group(1))
+    if as_integer:
+        return int(number)
+    return number
+
+
+def _excel_coerce_cell(column_key, value, int_columns, float_columns):
+    """Return a value openpyxl can store as a number, or None/text for blanks."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and column_key in int_columns:
+        return value
+    if isinstance(value, float) and column_key in float_columns:
+        return value
+
+    text = str(value).strip()
+    if text == "" or text == "-":
+        return None
+
+    if column_key in int_columns:
+        parsed = _parse_excel_number(text, as_integer=True)
+        if parsed is not None:
+            return parsed
+        return value
+    if column_key in float_columns:
+        parsed = _parse_excel_number(text, as_integer=False)
+        if parsed is not None:
+            return parsed
+        return value
+    return value
+
+
+def write_excel_export_file(
+    path,
+    export_columns,
+    rows,
+    sheet_title="Export",
+    int_columns=None,
+    float_columns=None,
+):
+    """
+    Write rows to an .xlsx file with numeric columns stored as Excel numbers.
+
+    export_columns: list of (field_key, header_title) like EXPORT_COLUMNS in example scripts.
+    rows: list of dicts keyed by field_key.
+    int_columns / float_columns: sets of field_key names to coerce (blank and '-' become empty cells).
+    """
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        print("ERROR: Excel export requires openpyxl. Install with: pip install openpyxl")
+        sys.exit(1)
+
+    int_columns = int_columns or frozenset()
+    float_columns = float_columns or frozenset()
+    field_keys = [key for key, _ in export_columns]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = (sheet_title or "Export")[:31]
+    ws.append([title for _, title in export_columns])
+    for row in rows:
+        ws.append([
+            _excel_coerce_cell(key, row.get(key, ""), int_columns, float_columns)
+            for key in field_keys
+        ])
+    wb.save(path)
+
+
+def _add_export_arguments(parser):
+    parser.add_argument(
+        "-csv",
+        "--csv",
+        nargs="?",
+        const=_EXPORT_USE_DEFAULT,
+        default="",
+        dest="csv_export",
+        metavar="FILE",
+        help="Write tabular results to CSV (optional FILE; script default name if omitted)",
+    )
+    parser.add_argument(
+        "-excel",
+        "--excel",
+        "-xlsx",
+        "--xlsx",
+        nargs="?",
+        const=_EXPORT_USE_DEFAULT,
+        default="",
+        dest="excel_export",
+        metavar="FILE",
+        help="Write tabular results to Excel .xlsx (optional FILE; requires openpyxl)",
+    )
+
+
 ##########################################################################
 # input_command_line
 ##########################################################################
-def input_command_line(help=False):
+def input_command_line(help=False, export_options=False, min_age_option=False, disable_imds_v1_option=False):
     parser = argparse.ArgumentParser(formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=130))
     parser.add_argument('-cp', default="DEFAULT", dest='config_profile', help='Config Profile inside the config file')
     parser.add_argument('-ip', action='store_true', default=False, dest='is_instance_principals', help='Use Instance Principals for Authentication')
@@ -58,6 +207,26 @@ def input_command_line(help=False):
     parser.add_argument("-log", nargs='?', const='log.txt', default="", dest='log_file', help="Output also to logfile. If logfile not specified, will log to log.txt")
     parser.add_argument("-rg", default="", dest='region', help="Select Region")
     parser.add_argument("-c", default="", dest='compartment', help="Select Compartment (OCID, name or full path e.g. /root/prod)")
+    if export_options:
+        _add_export_arguments(parser)
+    if min_age_option:
+        parser.add_argument(
+            "-minage",
+            "--minage",
+            type=_non_negative_int,
+            default=0,
+            metavar="DAYS",
+            help="Only include resources at least DAYS old (from time_created)",
+        )
+    if disable_imds_v1_option:
+        parser.add_argument(
+            "-disable",
+            "--disable",
+            action="store_true",
+            default=False,
+            dest="disable_imds_v1",
+            help="Disable IMDS v1 on matching instances (requires manage instance permission)",
+        )
     cmd = parser.parse_args()
 
     # If running in Cloud Shell (OCI_CLI_CLOUD_SHELL=true), default to Delegation Token

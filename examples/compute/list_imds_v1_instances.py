@@ -282,13 +282,7 @@ def apply_disable_imds_v1(config, signer, matches):
 
 
 def parse_cmd():
-    """Framework CLI plus script-only -disable (not passed to shared input_command_line)."""
-    disable_imds_v1 = "-disable" in sys.argv[1:] or "--disable" in sys.argv[1:]
-    if disable_imds_v1:
-        sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a not in ("-disable", "--disable")]
-    cmd = input_command_line()
-    cmd.disable_imds_v1 = disable_imds_v1
-    return cmd
+    return input_command_line(disable_imds_v1_option=True)
 
 
 def main():
