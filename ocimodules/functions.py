@@ -42,6 +42,7 @@ def input_command_line(help=False):
     parser.add_argument('-cp', default="DEFAULT", dest='config_profile', help='Config Profile inside the config file')
     parser.add_argument('-ip', action='store_true', default=False, dest='is_instance_principals', help='Use Instance Principals for Authentication')
     parser.add_argument('-dt', action='store_true', default=False, dest='is_delegation_token', help='Use Delegation Token for Authentication')
+    parser.add_argument('-st', action='store_true', default=False, dest='is_security_token', help='Use Session (Security Token) Authentication, created with "oci session authenticate"')
     parser.add_argument("-log", nargs='?', const='log.txt', default="", dest='log_file', help="Output also to logfile. If logfile not specified, will log to log.txt")
     parser.add_argument("-rg", default="", dest='region', help="Select Region")
     parser.add_argument("-c", default="", dest='compartment', help="Select Compartment (OCID, name or full path e.g. /root/prod)")
@@ -52,7 +53,12 @@ def input_command_line(help=False):
         print("Running in Cloud Shell..")
         cmd.is_delegation_token = True
         cmd.is_instance_principals = False
+        cmd.is_security_token = False
         cmd.config_profile = "DEFAULT"
+
+    # If OCI_CLI_AUTH=security_token is set (same variable the OCI CLI uses), default to Session Authentication
+    elif os.environ.get("OCI_CLI_AUTH", "").lower() == "security_token" and not (cmd.is_instance_principals or cmd.is_delegation_token):
+        cmd.is_security_token = True
 
     if help:
         parser.print_help()
@@ -62,10 +68,10 @@ def input_command_line(help=False):
 
 ##########################################################################
 # Create signer for Authentication
-# Input - config_profile and is_instance_principals and is_delegation_token
+# Input - config_profile, is_instance_principals, is_delegation_token, is_security_token
 # Output - config and signer objects
 ##########################################################################
-def create_signer(config_profile, is_instance_principals, is_delegation_token):
+def create_signer(config_profile, is_instance_principals, is_delegation_token, is_security_token=False):
 
     # -----------------------------
     # Instance Principals
@@ -114,6 +120,50 @@ def create_signer(config_profile, is_instance_principals, is_delegation_token):
             sys.exit(1)
 
     # -----------------------------
+    # Session / Security Token authentication
+    # Profile created with: oci session authenticate [--profile-name NAME]
+    # The profile contains security_token_file, key_file, tenancy and region (no user/fingerprint).
+    # https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/clitoken.htm
+    # -----------------------------
+    elif is_security_token:
+        try:
+            config = oci.config.from_file(
+                oci.config.DEFAULT_LOCATION,
+                (config_profile if config_profile else oci.config.DEFAULT_PROFILE)
+            )
+            token_file = config["security_token_file"]
+            with open(os.path.expanduser(token_file), 'r') as f:
+                token = f.read().strip()
+
+            private_key = oci.signer.load_private_key_from_file(
+                config["key_file"],
+                pass_phrase=oci.config.get_config_value_or_default(config, "pass_phrase")
+            )
+
+            # Check the token has not expired before making any API call
+            token_container = oci.auth.security_token_container.SecurityTokenContainer(None, token)
+            if not token_container.valid():
+                print("The session token in profile '{}' has expired.".format(config_profile))
+                print("Refresh it with:  oci session refresh --profile {}".format(config_profile))
+                print("or re-authenticate: oci session authenticate --profile-name {}".format(config_profile))
+                sys.exit(1)
+
+            # Session profiles have no 'user' key; the user OCID is the 'sub' claim of the token
+            if "user" not in config and token_container.get_jwt().get("sub"):
+                config["user"] = token_container.get_jwt()["sub"]
+
+            signer = oci.auth.signers.SecurityTokenSigner(token, private_key)
+            return config, signer
+
+        except KeyError as e:
+            print("Profile '{}' is missing key {} - is this a session profile created with 'oci session authenticate'? aborting".format(config_profile, e))
+            sys.exit(1)
+
+        except Exception as e:
+            print("Error obtaining session token authentication, aborting: {}".format(e))
+            sys.exit(1)
+
+    # -----------------------------
     # config file authentication (~/.oci/config)
     # -----------------------------
     else:
@@ -142,21 +192,22 @@ def create_signer(config_profile, is_instance_principals, is_delegation_token):
 #                 Login
 #################################################
 def login(config, signer):
-    """Print SDK version and the identity we are connected with. Returns the user name (or None for IP/DT)."""
+    """Print SDK version and the identity we are connected with. Returns the user name (or None if unknown)."""
     print("OCI SDK Version: {}".format(oci.__version__))
 
-    # Instance Principals / Delegation Token configs have no 'user' key
-    if "user" not in config:
+    # Instance Principals / Delegation Token have no user (session auth gets it from the token in create_signer)
+    user_id = config.get("user")
+    if user_id is None:
         print("Logged in as: {} @ {}".format("Instance Principal / Delegation Token", config["region"]))
         return None
 
     identity = oci.identity.IdentityClient(config, signer=signer)
     try:
-        user = identity.get_user(user_id=config["user"]).data
+        user = identity.get_user(user_id=user_id).data
         print("Logged in as: {} @ {}".format(user.name, config["region"]))
         return user.name
     except oci.exceptions.ServiceError as e:
-        print("Logged in as: {} @ {} (could not read user: {})".format("unknown", config["region"], e.message))
+        print("Logged in as: {} @ {} (could not read user: {})".format(user_id, config["region"], e.message))
         return None
 
 
