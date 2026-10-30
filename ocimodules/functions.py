@@ -215,6 +215,7 @@ def input_command_line(help=False, export_options=False, min_age_option=False, d
             "--minage",
             type=_non_negative_int,
             default=0,
+            dest="min_age_days",
             metavar="DAYS",
             help="Only include resources at least DAYS old (from time_created)",
         )
