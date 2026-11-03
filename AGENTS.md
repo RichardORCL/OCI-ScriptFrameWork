@@ -128,6 +128,8 @@ Tag namespace and keys come from the user’s **`~/.oci/config`** profile (`owne
 | `examples/compute/list_compute_instances.py` | Full instance inventory, images, attachments, boot/block totals, CSV/Excel |
 | `examples/objectstorage/list_public_buckets.py` | `get_namespace`, list + get detail APIs |
 | `examples/networking/list_load_balancer_tls_ciphers.py` | Listener-level reporting, SDK doc-derived predefined cipher maps |
+| `examples/IAM/list_user_api_keys.py` | Tenancy-scoped Identity: users and API key fingerprints with `time_created` |
+| `examples/audit/list_post_audit_events.py` | Regional Audit ListEvents, filter POST in a time window, CSV/Excel |
 
 When adding a script in a new folder under `examples/`, mirror docstring **Usage** lines and the same header/summary output style.
 
