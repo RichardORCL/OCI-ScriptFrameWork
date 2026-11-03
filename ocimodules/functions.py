@@ -146,25 +146,46 @@ def write_excel_export_file(
     rows: list of dicts keyed by field_key.
     int_columns / float_columns: sets of field_key names to coerce (blank and '-' become empty cells).
     """
+    write_excel_export_sheets(path, [{
+        "title": sheet_title,
+        "export_columns": export_columns,
+        "rows": rows,
+        "int_columns": int_columns,
+        "float_columns": float_columns,
+    }])
+
+
+def write_excel_export_sheets(path, sheets):
+    """
+    Write several sheets to one .xlsx file (same cell handling as write_excel_export_file).
+
+    sheets: list of dicts with keys
+      title          - sheet name (max 31 characters)
+      export_columns - list of (field_key, header_title)
+      rows           - list of dicts keyed by field_key
+      int_columns / float_columns - optional sets of field_key names to store as numbers
+    """
     try:
         from openpyxl import Workbook
     except ImportError:
         print("ERROR: Excel export requires openpyxl. Install with: pip install openpyxl")
         sys.exit(1)
 
-    int_columns = int_columns or frozenset()
-    float_columns = float_columns or frozenset()
-    field_keys = [key for key, _ in export_columns]
-
     wb = Workbook()
-    ws = wb.active
-    ws.title = (sheet_title or "Export")[:31]
-    ws.append([title for _, title in export_columns])
-    for row in rows:
-        ws.append([
-            _excel_coerce_cell(key, row.get(key, ""), int_columns, float_columns)
-            for key in field_keys
-        ])
+    wb.remove(wb.active)
+    for sheet in sheets:
+        int_columns = sheet.get("int_columns") or frozenset()
+        float_columns = sheet.get("float_columns") or frozenset()
+        export_columns = sheet["export_columns"]
+        field_keys = [key for key, _ in export_columns]
+
+        ws = wb.create_sheet(title=(sheet.get("title") or "Export")[:31])
+        ws.append([title for _, title in export_columns])
+        for row in sheet["rows"]:
+            ws.append([
+                _excel_coerce_cell(key, row.get(key, ""), int_columns, float_columns)
+                for key in field_keys
+            ])
     wb.save(path)
 
 
@@ -196,7 +217,7 @@ def _add_export_arguments(parser):
 ##########################################################################
 # input_command_line
 ##########################################################################
-def input_command_line(help=False, export_options=False, min_age_option=False, disable_imds_v1_option=False):
+def input_command_line(help=False, export_options=False, min_age_option=False, disable_imds_v1_option=False, vcn_option=False):
     parser = argparse.ArgumentParser(formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=80, width=130))
     parser.add_argument('-cp', default="DEFAULT", dest='config_profile', help='Config Profile inside the config file')
     parser.add_argument('-ip', action='store_true', default=False, dest='is_instance_principals', help='Use Instance Principals for Authentication')
@@ -227,6 +248,15 @@ def input_command_line(help=False, export_options=False, min_age_option=False, d
             default=False,
             dest="disable_imds_v1",
             help="Disable IMDS v1 on matching instances (requires manage instance permission)",
+        )
+    if vcn_option:
+        parser.add_argument(
+            "-vcn",
+            "--vcn",
+            default="",
+            dest="vcn",
+            metavar="VCN",
+            help="Select VCN (OCID or display name; use -c / -rg to narrow a name search)",
         )
     cmd = parser.parse_args()
 

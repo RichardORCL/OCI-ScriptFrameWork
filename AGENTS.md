@@ -85,6 +85,7 @@ Register optional flags on the shared parser so `-h` / `--help` lists them:
 | CSV / Excel export | `input_command_line(export_options=True)` then `resolve_export_paths(cmd, "default.csv", "default.xlsx")` |
 | Minimum age filter | `min_age_option=True` (sets `cmd.min_age_days`) |
 | IMDS `-disable` | `disable_imds_v1_option=True` (sets `cmd.disable_imds_v1`) |
+| VCN selector `-vcn` | `vcn_option=True` (sets `cmd.vcn`, OCID or display name) |
 
 Only add new flags to `functions.py` when multiple scripts share them; otherwise extend `input_command_line()` with a new optional `*_option` parameter.
 
@@ -128,6 +129,7 @@ Tag namespace and keys come from the user’s **`~/.oci/config`** profile (`owne
 | `examples/compute/list_compute_instances.py` | Full instance inventory, images, attachments, boot/block totals, CSV/Excel |
 | `examples/objectstorage/list_public_buckets.py` | `get_namespace`, list + get detail APIs |
 | `examples/networking/list_load_balancer_tls_ciphers.py` | Listener-level reporting, SDK doc-derived predefined cipher maps |
+| `examples/networking/list_vcn_ip_addresses.py` | Single-resource lookup by OCID or name (`-vcn`), cross-compartment child resources, private/public/IPv6 IPs per subnet |
 | `examples/IAM/list_user_api_keys.py` | Tenancy-scoped Identity: users and API key fingerprints with `time_created` |
 | `examples/audit/list_post_audit_events.py` | Regional Audit ListEvents, filter POST in a time window, CSV/Excel |
 
