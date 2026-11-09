@@ -132,6 +132,7 @@ Tag namespace and keys come from the user’s **`~/.oci/config`** profile (`owne
 | `examples/networking/list_vcn_ip_addresses.py` | Single-resource lookup by OCID or name (`-vcn`), cross-compartment child resources, private/public/IPv6 IPs per subnet |
 | `examples/IAM/list_user_api_keys.py` | Tenancy-scoped Identity: users and API key fingerprints with `time_created` |
 | `examples/audit/list_post_audit_events.py` | Regional Audit ListEvents, filter POST in a time window, CSV/Excel |
+| `examples/ocvs/addESXihosts.py` | Interactive add ESXi hosts: Resource Search SDDC discovery, guided CreateEsxiHost |
 
 When adding a script in a new folder under `examples/`, mirror docstring **Usage** lines and the same header/summary output style.
 
