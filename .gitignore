@@ -34,3 +34,6 @@ config
 .idea/
 .DS_Store
 Thumbs.db
+
+# Private scripts (not published)
+examples/blockvolume/delete_unattached_volumes.py

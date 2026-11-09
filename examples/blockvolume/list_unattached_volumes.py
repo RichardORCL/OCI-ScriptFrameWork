@@ -3,7 +3,9 @@ List boot and block volumes that are not attached to a compute instance.
 
 Scans subscribed regions in parallel (one thread per region). Within each region,
 compartments are processed sequentially. A volume is unattached when no compute
-VolumeAttachment / BootVolumeAttachment references it with lifecycle ATTACHED.
+VolumeAttachment / BootVolumeAttachment references it with lifecycle ATTACHING, ATTACHED or
+DETACHING. Attachments are read from ALL compartments (also outside -c), because an
+attachment lives in the instance's compartment, which can differ from the volume's.
 
 Output columns: region, volume type, compartment path, display name, size (GB),
 VPU per GB, owner (from defined tags via get_owner / ~/.oci/config), age in days
@@ -89,7 +91,8 @@ THROTTLE_RETRY_STRATEGY = RetryStrategyBuilder(
 MANUAL_429_MAX_ATTEMPTS = 12
 MANUAL_429_BASE_SLEEP = 8
 
-ATTACHED = oci.core.models.VolumeAttachment.LIFECYCLE_STATE_ATTACHED
+# Attachment states that mean the volume is (still) in use by an instance
+ATTACHED_STATES = frozenset({"ATTACHING", "ATTACHED", "DETACHING"})
 
 
 class ScanProgress:
@@ -215,7 +218,7 @@ def attached_volume_ids(compute, compartment_id, region, availability_domains):
     boot_ids = set()
 
     for attachment in paginate(region, compute.list_volume_attachments, compartment_id=compartment_id):
-        if attachment.lifecycle_state == ATTACHED and attachment.volume_id:
+        if attachment.lifecycle_state in ATTACHED_STATES and attachment.volume_id:
             block_ids.add(attachment.volume_id)
 
     for ad in availability_domains:
@@ -225,24 +228,41 @@ def attached_volume_ids(compute, compartment_id, region, availability_domains):
             availability_domain=ad.name,
             compartment_id=compartment_id,
         ):
-            if attachment.lifecycle_state == ATTACHED and attachment.boot_volume_id:
+            if attachment.lifecycle_state in ATTACHED_STATES and attachment.boot_volume_id:
                 boot_ids.add(attachment.boot_volume_id)
 
     return block_ids, boot_ids
 
 
-def scan_compartment(region, blockstorage, compute, availability_domains, compartment_id, compartment_path, config, config_profile):
+def collect_region_attachments(region, compute, availability_domains, all_compartments, progress):
+    """
+    Attached block / boot volume OCIDs in a region, from the attachments in ALL compartments.
+
+    Attachments live in the instance's compartment, which can differ from the volume's
+    compartment (and can be outside the -c filter), so every compartment is checked.
+    Returns (block_ids, boot_ids, gaps) where gaps lists compartments whose attachments
+    could not be read (volumes attached from there would wrongly look unattached).
+    """
+    block_ids = set()
+    boot_ids = set()
+    gaps = []
+    for comp in all_compartments:
+        try:
+            comp_block, comp_boot = attached_volume_ids(
+                compute, comp.details.id, region, availability_domains
+            )
+            block_ids |= comp_block
+            boot_ids |= comp_boot
+        except oci.exceptions.ServiceError as e:
+            gaps.append((comp.fullpath, "attachments: {} {}".format(e.status, e.message)))
+        progress.compartment_finished(region, "attachments " + comp.fullpath)
+    return block_ids, boot_ids, gaps
+
+
+def scan_compartment(region, blockstorage, compartment_id, compartment_path, config, config_profile,
+                     block_attached, boot_attached):
     rows = []
     errors = []
-
-    try:
-        block_attached, boot_attached = attached_volume_ids(
-            compute, compartment_id, region, availability_domains
-        )
-    except oci.exceptions.ServiceError as e:
-        if e.status in (403, 404):
-            return rows, errors
-        return rows, [(compartment_path, "attachments: {}".format(e.message))]
 
     try:
         for volume in paginate(region, blockstorage.list_volumes, compartment_id=compartment_id):
@@ -285,7 +305,8 @@ def _volume_row(region, volume_type, compartment_path, volume, config, config_pr
     }
 
 
-def scan_region(config, signer, tenancy_id, region, compartments_to_check, config_profile, progress):
+def scan_region(config, signer, tenancy_id, region, compartments_to_check, all_compartments,
+                config_profile, progress):
     regional_config = dict(config)
     regional_config["region"] = region
     blockstorage = oci.core.BlockstorageClient(regional_config, signer=signer)
@@ -294,8 +315,16 @@ def scan_region(config, signer, tenancy_id, region, compartments_to_check, confi
     try:
         availability_domains = get_availability_domains(identity, tenancy_id, region)
     except oci.exceptions.ServiceError as e:
-        progress.skip_remaining_compartments(region, len(compartments_to_check), "AD list failed")
-        return region, [], [("/region", "availability domains: {}".format(e.message))]
+        progress.skip_remaining_compartments(
+            region, len(compartments_to_check) + len(all_compartments), "AD list failed"
+        )
+        return region, [], [("/region", "availability domains: {}".format(e.message))], [
+            ("/region", "availability domains: {}".format(e.message))
+        ]
+
+    block_attached, boot_attached, gaps = collect_region_attachments(
+        region, compute, availability_domains, all_compartments, progress
+    )
 
     rows = []
     errors = []
@@ -303,19 +332,19 @@ def scan_region(config, signer, tenancy_id, region, compartments_to_check, confi
         comp_rows, comp_errors = scan_compartment(
             region,
             blockstorage,
-            compute,
-            availability_domains,
             comp.details.id,
             comp.fullpath,
             config,
             config_profile,
+            block_attached,
+            boot_attached,
         )
         rows.extend(comp_rows)
         for path, message in comp_errors:
             errors.append((path, message))
         progress.compartment_finished(region, comp.fullpath)
 
-    return region, rows, errors
+    return region, rows, errors, gaps
 
 
 def _sorted_rows(all_rows):
@@ -424,10 +453,12 @@ def main():
         workers = region_worker_count(regions)
         compartment_count = len(scan_compartments)
         region_count = len(regions)
-        progress = ScanProgress(compartment_count, region_count)
+        # attachments are read from all compartments, volumes from the scanned ones
+        progress = ScanProgress(compartment_count + len(compartments), region_count)
 
         all_rows = []
         region_errors = []
+        attachment_gaps = []
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
@@ -438,14 +469,17 @@ def main():
                     tenancy_id,
                     region,
                     scan_compartments,
+                    compartments,
                     cmd.config_profile,
                     progress,
                 ): region
                 for region in regions
             }
             for future in as_completed(futures):
-                region, rows, errors = future.result()
+                region, rows, errors, gaps = future.result()
                 all_rows.extend(rows)
+                for path, message in gaps:
+                    attachment_gaps.append((region, path, message))
                 for path, message in errors:
                     region_errors.append((region, path, message))
 
@@ -511,6 +545,17 @@ def main():
         if cmd.excel_export:
             write_excel_export(cmd.excel_export, sorted_rows)
             print("Excel export written: {}".format(os.path.abspath(cmd.excel_export)))
+
+        if attachment_gaps:
+            print("")
+            print("WARNING: volume attachments could not be read in {} compartment/region(s).".format(
+                len(attachment_gaps)))
+            print("Volumes attached to instances there may be listed as unattached:")
+            for region, path, message in attachment_gaps[:10]:
+                print("  {}  {}  {}".format(region, path, message))
+            if len(attachment_gaps) > 10:
+                print("  ... and {} more".format(len(attachment_gaps) - 10))
+            print("")
 
         if region_errors:
             print("Non-fatal errors (first 10):")
