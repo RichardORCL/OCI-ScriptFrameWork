@@ -1,13 +1,21 @@
 """
 Interactive workflow to add ESXi hosts to an Oracle Cloud VMware Solution (OCVS) cluster.
 
-The script discovers ACTIVE SDDCs via Resource Search in each subscribed region (unless -rg is set),
+The script discovers ACTIVE SDDCs via Resource Search in the configured region (unless -rg is set),
 then guides you through
-SDDC, cluster, host shape, VMware/ESXi software version, optional VCF BYOL allocation, and
-host count, shows a summary, and on confirmation calls CreateEsxiHost for each node.
+SDDC, cluster, host shape, VMware/ESXi software version, optional VCF BYOL allocation,
+optional bare-metal capacity reservation, and host count, shows a summary, and on
+confirmation calls CreateEsxiHost for each node. Reservations are discovered in the
+selected region and compartment scope (-c), and must match the cluster's availability
+domain and selected shape/OCPU count. Multi-AD SDDCs use on-demand capacity only.
+Reservations with available capacity outside a specific fault domain require an
+SDK supporting initial_fault_domain_host_distribution and explicit confirmation
+to use uneven host distribution, which can reduce availability.
 
 IAM: inspect/list SDDCs, clusters, supported shapes and software versions, BYOL allocations;
       manage ESXi hosts (create) in the target compartment.
+      For reserved capacity: read compute-capacity-reservations in the reservation
+      compartments and permission to use the selected compute capacity reservation.
 
 Usage (from repository root):
     python examples/ocvs/addESXihosts.py
@@ -40,8 +48,8 @@ from ocimodules.functions import (
 
 oci.circuit_breaker.GLOBAL_CIRCUIT_BREAKER_STRATEGY = oci.circuit_breaker.NoCircuitBreakerStrategy()
 
-MIN_OCI_VERSION = "2.88.0"
-SCRIPT_VERSION = "26.11.09"
+MIN_OCI_VERSION = "2.185.2"
+SCRIPT_VERSION = "26.11.16"
 
 CREATE_ESXI_HOST = oci.ocvp.models.SupportedHostShapeSummary.SUPPORTED_OPERATIONS_CREATE_ESXI_HOST
 SDDC_SEARCH_QUERY = "query vmwaresddc resources"
@@ -306,6 +314,58 @@ def esxi_versions_for_shape(vmware_bundle, host_shape_name):
     return candidates
 
 
+def _matching_reservation_configs(reservation, host_shape, host_ocpu):
+    """Return matching reservation configurations that still have free hosts."""
+    matches = []
+    for capacity in reservation.instance_reservation_configs or []:
+        if capacity.instance_shape != host_shape:
+            continue
+        shape_config = capacity.instance_shape_config
+        if (shape_config is not None and shape_config.ocpus is not None
+                and shape_config.ocpus != host_ocpu):
+            continue
+        if (capacity.reserved_count or 0) > (capacity.used_count or 0):
+            matches.append(capacity)
+    return matches
+
+
+def list_capacity_reservations(client, compartments, availability_domain, host_shape, host_ocpu):
+    """Return (reservation, matching free host count) pairs within the CLI scope."""
+    result = []
+    for compartment in compartments:
+        try:
+            reservations = _paginate(
+                client.list_compute_capacity_reservations,
+                compartment_id=compartment.details.id,
+                availability_domain=availability_domain,
+                lifecycle_state="ACTIVE",
+            )
+        except oci.exceptions.ServiceError as e:
+            print("  Warning: cannot list capacity reservations in {}: {}".format(
+                compartment.fullpath, e.message,
+            ))
+            continue
+        for summary in reservations:
+            try:
+                reservation = client.get_compute_capacity_reservation(summary.id).data
+            except oci.exceptions.ServiceError as e:
+                print("  Warning: cannot read capacity reservation {}: {}".format(
+                    summary.id, e.message,
+                ))
+                continue
+            if (reservation.lifecycle_state != "ACTIVE"
+                    or reservation.availability_domain != availability_domain):
+                continue
+            available = sum(
+                (capacity.reserved_count or 0) - (capacity.used_count or 0)
+                for capacity in _matching_reservation_configs(reservation, host_shape, host_ocpu)
+            )
+            if available:
+                result.append((reservation, available))
+    result.sort(key=lambda item: ((item[0].display_name or "").lower(), item[0].id))
+    return result
+
+
 def pick_host_ocpu(shape, cluster):
     supported = shape.supported_ocpu_count or []
     if len(supported) == 1:
@@ -336,6 +396,18 @@ def print_summary(selection):
     ))
     print("  Host shape:          {}".format(selection["host_shape"]))
     print("  OCPUs per host:      {}".format(selection["host_ocpu_count"]))
+    if selection.get("capacity_reservation_id"):
+        print("  Capacity reservation: {} ({})".format(
+            selection["capacity_reservation_name"], selection["capacity_reservation_id"],
+        ))
+        print("  Reserved hosts free: {} (at selection time)".format(
+            selection["capacity_available_hosts"],
+        ))
+        if selection.get("initial_fault_domain_host_distribution"):
+            print("  Host distribution:   Unevenly distributed (fault domain balancing disabled)")
+            print("  Warning: uneven host distribution can reduce availability.")
+    else:
+        print("  Capacity type:       On-demand")
     print("  VMware bundle:       {} — {}".format(
         selection["vmware_version"], selection["vmware_description"]
     ))
@@ -369,6 +441,12 @@ def create_esxi_hosts(clients, selection):
             details.vcf_byol_allocation_id = selection["byol_allocation_id"]
         if selection["compute_availability_domain"]:
             details.compute_availability_domain = selection["compute_availability_domain"]
+        if selection.get("capacity_reservation_id"):
+            details.capacity_reservation_id = selection["capacity_reservation_id"]
+        if selection.get("initial_fault_domain_host_distribution"):
+            if "initial_fault_domain_host_distribution" not in details.swagger_types:
+                raise RuntimeError("Upgrade the OCI SDK to support uneven host distribution.")
+            details.initial_fault_domain_host_distribution = selection["initial_fault_domain_host_distribution"]
 
         try:
             response = clients["esxi"].create_esxi_host(
@@ -432,16 +510,19 @@ def main():
         if selected_compartment_id:
             compartment_ids_filter = {c.details.id for c in compartments}
 
-        subscribed = sorted(SubscribedRegions(config, signer))
         if cmd.region:
-            if cmd.region not in subscribed:
+            if cmd.region not in SubscribedRegions(config, signer):
                 print("Region {} is not subscribed.".format(cmd.region))
                 return 1
             regions = [cmd.region]
         else:
-            regions = subscribed
+            configured_region = config.get("region")
+            if not configured_region:
+                print("No region configured; specify a region in the OCI config or with -rg.")
+                return 1
+            regions = [configured_region]
 
-        print("Searching for SDDCs (Resource Search) in {} region(s)...".format(len(regions)))
+        print("Searching for SDDCs (Resource Search) in {}...".format(regions[0]))
         sddc_refs = discover_sddcs(
             config,
             signer,
@@ -584,20 +665,79 @@ def main():
             print("Cancelled.")
             return 0
 
+        host_ocpu = pick_host_ocpu(shape, cluster)
+        if host_ocpu is None:
+            print("Cancelled.")
+            return 0
+
+        reservation = None
+        capacity_available_hosts = None
+        host_distribution = None
+        availability_domain = cluster.compute_availability_domain
+        if (shape.name.startswith("BM.") and availability_domain
+                and availability_domain.lower() != "multi-ad"):
+            capacity_type = prompt_choice(
+                "Select capacity type", ["On-demand", "Capacity reservation"],
+                lambda item: item, allow_back=True,
+            )
+            if capacity_type is None:
+                print("Cancelled.")
+                return 0
+            if capacity_type == "Capacity reservation":
+                if "capacity_reservation_id" not in oci.ocvp.models.CreateEsxiHostDetails().swagger_types:
+                    print("Installed OCI SDK does not support ESXi capacity reservations; upgrade oci.")
+                    return 1
+                regional_config = dict(config)
+                regional_config["region"] = sddc_ref.region
+                compute_client = oci.core.ComputeClient(regional_config, signer=signer)
+                print("Searching for matching capacity reservations...")
+                reservations = list_capacity_reservations(
+                    compute_client, compartments, availability_domain, shape.name, host_ocpu,
+                )
+
+                def reservation_label(item):
+                    reserved, available = item
+                    return "{} | {} | {} | available={} | {}".format(
+                        reserved.display_name or reserved.id,
+                        compartment_paths.get(reserved.compartment_id, reserved.compartment_id),
+                        reserved.availability_domain, available, reserved.id,
+                    )
+
+                choice = prompt_choice(
+                    "Select capacity reservation", reservations, reservation_label, allow_back=True,
+                )
+                if choice is None:
+                    print("No capacity reservation selected; no hosts were created.")
+                    return 0
+                reservation, capacity_available_hosts = choice
+                matching_configs = _matching_reservation_configs(reservation, shape.name, host_ocpu)
+                if any(not capacity.fault_domain for capacity in matching_configs):
+                    print("This reservation includes available capacity without a specific fault domain.")
+                    print("OCI requires fault domain balancing to be disabled to use that capacity.")
+                    if "initial_fault_domain_host_distribution" not in oci.ocvp.models.CreateEsxiHostDetails().swagger_types:
+                        print("Installed OCI SDK does not support this host distribution option.")
+                        print("Upgrade with: python3 -m pip install --upgrade oci")
+                        print("Then rerun the script, or use a reservation with a specific fault domain.")
+                        return 1
+                    print("Warning: uneven host distribution can reduce availability.")
+                    if not confirm("Use uneven host distribution for the new hosts?"):
+                        print("Cancelled.")
+                        return 0
+                    host_distribution = "UNEVENLY_DISTRIBUTED"
+        else:
+            print("Using on-demand capacity (reservations require a BM shape and single-AD SDDC/cluster).")
+
         max_hosts = None
         if byol_choice.id and byol_choice.available_units is not None:
             max_hosts = byol_choice.available_units
+        if capacity_available_hosts is not None:
+            max_hosts = min(max_hosts, capacity_available_hosts) if max_hosts is not None else capacity_available_hosts
 
         host_count = prompt_positive_int(
             "How many ESXi hosts to add? ",
             maximum=max_hosts,
         )
         if host_count is None:
-            print("Cancelled.")
-            return 0
-
-        host_ocpu = pick_host_ocpu(shape, cluster)
-        if host_ocpu is None:
             print("Cancelled.")
             return 0
 
@@ -610,6 +750,10 @@ def main():
             "cluster_name": cluster.display_name or cluster.id,
             "host_shape": shape.name,
             "host_ocpu_count": host_ocpu,
+            "capacity_reservation_id": reservation.id if reservation else None,
+            "capacity_reservation_name": reservation.display_name if reservation else None,
+            "capacity_available_hosts": capacity_available_hosts,
+            "initial_fault_domain_host_distribution": host_distribution,
             "vmware_version": vmware_bundle.version,
             "vmware_description": vmware_bundle.description or "",
             "esxi_version": esxi_version,
